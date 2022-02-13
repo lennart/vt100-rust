@@ -9,12 +9,13 @@ impl Parser {
     /// Creates a new terminal parser of the given size and with the given
     /// amount of scrollback.
     #[must_use]
-    pub fn new(rows: u16, cols: u16, scrollback_len: usize) -> Self {
+    pub fn new(rows: u16, cols: u16, scrollback_len: usize, csi_handler: crate::screen::CsiHandler) -> Self {
         Self {
             parser: vte::Parser::new(),
             screen: crate::screen::Screen::new(
                 crate::grid::Size { rows, cols },
                 scrollback_len,
+                csi_handler
             ),
         }
     }
@@ -58,7 +59,12 @@ impl Parser {
 impl Default for Parser {
     /// Returns a parser with dimensions 80x24 and no scrollback.
     fn default() -> Self {
-        Self::new(24, 80, 0)
+        Self::new(24, 80, 0, |screen, final_char, params, intermediate| {
+            match intermediate {
+                None => println!("unhandled csi {} (without intermediate)", final_char),
+                Some(i) => println!("unhandled csi {} {}", i, final_char)
+            }
+        })
     }
 }
 

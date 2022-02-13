@@ -7,6 +7,14 @@ const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 
+pub enum DispatchType {
+    EscapeSequence,
+    ControlSequenceIntroducer,
+    OperatingSystemCommand,
+    DeviceControlString,
+    ControlCharacter
+}
+
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MouseProtocolMode {
@@ -61,7 +69,7 @@ impl Default for MouseProtocolEncoding {
 }
 
 /// Represents the overall terminal state.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Screen {
     grid: crate::grid::Grid,
     alternate_grid: crate::grid::Grid,
@@ -80,12 +88,16 @@ pub struct Screen {
     visual_bell_count: usize,
 
     errors: usize,
+    csi_handler: CsiHandler
 }
+
+pub type CsiHandler = fn(screen: &Screen, final_char: char, params: &vte::Params, intermediate: Option<u8>) -> ();
 
 impl Screen {
     pub(crate) fn new(
         size: crate::grid::Size,
         scrollback_len: usize,
+        csi_handler: CsiHandler
     ) -> Self {
         let mut grid = crate::grid::Grid::new(size, scrollback_len);
         grid.allocate_rows();
@@ -107,6 +119,7 @@ impl Screen {
             visual_bell_count: 0,
 
             errors: 0,
+            csi_handler
         }
     }
 
@@ -1113,7 +1126,7 @@ impl Screen {
         let visual_bell_count = self.visual_bell_count;
         let errors = self.errors;
 
-        *self = Self::new(self.grid.size(), self.grid.scrollback_len());
+        *self = Self::new(self.grid.size(), self.grid.scrollback_len(), self.csi_handler);
 
         self.title = title;
         self.icon_name = icon_name;
@@ -1572,7 +1585,8 @@ impl vte::Perform for Screen {
             14 | 15 => {}
             _ => {
                 self.errors = self.errors.saturating_add(1);
-                log::debug!("unhandled control character: {}", b);
+                // (self.unhandled_dispatch)(
+                //     DispatchType::ControlCharacter, None, Some(b), None);
             }
         }
     }
@@ -1588,11 +1602,16 @@ impl vte::Perform for Screen {
                 b'c' => self.ris(),
                 b'g' => self.vb(),
                 _ => {
-                    log::debug!("unhandled escape code: ESC {}", b);
+                    // (self.unhandled_dispatch)(
+                    //     DispatchType::EscapeSequence, None, Some(b), None
+                    // )
+                    //log::debug!("unhandled escape code: ESC {}", b);
                 }
             },
             Some(i) => {
-                log::debug!("unhandled escape code: ESC {} {}", i, b);
+                    // (self.unhandled_dispatch)(
+                    //     DispatchType::EscapeSequence, None, Some(*i), Some(b as char)
+                    // )
             }
         }
     }
@@ -1630,13 +1649,19 @@ impl vte::Perform for Screen {
                     self.grid().size(),
                 )),
                 _ => {
-                    if log::log_enabled!(log::Level::Debug) {
-                        log::debug!(
-                            "unhandled csi sequence: CSI {} {}",
-                            param_str(params),
-                            c
-                        );
-                    }
+                    (self.csi_handler)(
+                        self,
+                        c,
+                        params,
+                        None,
+                    )
+                    // if log::log_enabled!(log::Level::Debug) {
+                    //     log::debug!(
+                    //         "unhandled csi sequence: CSI {} {}",
+                    //         param_str(params),
+                    //         c
+                    //     );
+                    // }
                 }
             },
             Some(b'?') => match c {
@@ -1645,24 +1670,36 @@ impl vte::Perform for Screen {
                 'h' => self.decset(params),
                 'l' => self.decrst(params),
                 _ => {
-                    if log::log_enabled!(log::Level::Debug) {
-                        log::debug!(
-                            "unhandled csi sequence: CSI ? {} {}",
-                            param_str(params),
-                            c
-                        );
-                    }
+                    (self.csi_handler)(
+                        self,
+                        c,
+                        params,
+                        None,
+                    )
+                    // if log::log_enabled!(log::Level::Debug) {
+                    //     log::debug!(
+                    //         "unhandled csi sequence: CSI ? {} {}",
+                    //         param_str(params),
+                    //         c
+                    //     );
+                    // }
                 }
             },
             Some(i) => {
-                if log::log_enabled!(log::Level::Debug) {
-                    log::debug!(
-                        "unhandled csi sequence: CSI {} {} {}",
-                        i,
-                        param_str(params),
-                        c
-                    );
-                }
+                (self.csi_handler)(
+                    self,
+                    c,
+                    params,
+                    Some(*i),
+                )
+                // if log::log_enabled!(log::Level::Debug) {
+                //     log::debug!(
+                //         "unhandled csi sequence: CSI {} {} {}",
+                //         i,
+                //         param_str(params),
+                //         c
+                //     );
+                // }
             }
         }
     }
@@ -1673,12 +1710,19 @@ impl vte::Perform for Screen {
             (Some(&b"1"), Some(s)) => self.osc1(s),
             (Some(&b"2"), Some(s)) => self.osc2(s),
             _ => {
-                if log::log_enabled!(log::Level::Debug) {
-                    log::debug!(
-                        "unhandled osc sequence: OSC {}",
-                        osc_param_str(params),
-                    );
-                }
+                // (self.unhandled_dispatch)(
+                //     DispatchType::OperatingSystemCommand,
+                //     None,
+                //     None,
+                //     None
+                // )
+
+                // if log::log_enabled!(log::Level::Debug) {
+                //     log::debug!(
+                //         "unhandled osc sequence: OSC {}",
+                //         osc_param_str(params),
+                //     );
+                // }
             }
         }
     }
@@ -1692,17 +1736,35 @@ impl vte::Perform for Screen {
     ) {
         if log::log_enabled!(log::Level::Debug) {
             match intermediates.get(0) {
-                None => log::debug!(
-                    "unhandled dcs sequence: DCS {} {}",
-                    param_str(params),
-                    action,
-                ),
-                Some(i) => log::debug!(
-                    "unhandled dcs sequence: DCS {} {} {}",
-                    i,
-                    param_str(params),
-                    action,
-                ),
+                None => {
+                    // (self.unhandled_dispatch)(
+                    //     DispatchType::DeviceControlString,
+                    //     Some(params),
+                    //     None,
+                    //     Some(action)
+                    // )
+
+                    // log::debug!(
+                    // "unhandled dcs sequence: DCS {} {}",
+                    // param_str(params),
+                    // action,
+                    // )
+                },
+                Some(i) => {
+                    // (self.unhandled_dispatch)(
+                    //     DispatchType::DeviceControlString,
+                    //     Some(params),
+                    //     None,
+                    //     Some(action)
+                    // )
+
+                    // log::debug!(
+                    // "unhandled dcs sequence: DCS {} {} {}",
+                    // i,
+                    // param_str(params),
+                    // action,
+                    // )
+                },
             }
         }
     }
